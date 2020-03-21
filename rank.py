@@ -4,8 +4,14 @@ import os
 import random
 import sqlite3
 
+from enum import Enum
 
 DB_NAME = 'sessions.db'
+
+
+class Action(Enum):
+    PREVIOUS = 0
+    EXIT = 1
 
 
 class SessionHistory:
@@ -86,12 +92,13 @@ class SessionHistory:
                         'FROM SESSION AS S, HISTORY AS H '
                         'WHERE S.Name = ? AND S.Name = H.SessionName AND H.Idx = ?',
                         (self._session_name, self._idx-1))
-            conn.commit()
 
             row = cur.fetchone()
 
+            conn.commit()
+
             if row:
-                return row[2]
+                return row[0]
 
             conn.close()
         return None
@@ -102,25 +109,41 @@ class SessionHistory:
         if prev_item is not None:
             conn = sqlite3.connect(DB_NAME)
             cur = conn.cursor()
+
+            # Check if the current row is a pivot, if so remove the row before it as long as its a comparison
+            cur.execute('SELECT H.Type '
+                        'FROM SESSION AS S, HISTORY AS H '
+                        'WHERE S.Name = ? AND S.Name = H.SessionName AND H.Idx IN (?,?)'
+                        'ORDER BY H.Idx ',
+                        (self._session_name, self._idx-1, self._idx-2))
+
+            if cur.fetchone()[0] == 'comparison' and cur.fetchone()[0] == 'pivot':
+                cur.execute('DELETE FROM HISTORY '
+                            'WHERE SessionName = ? AND Idx = ?',
+                            (self._session_name, self._idx-2))
+                self._size -= 1
+
             cur.execute('DELETE FROM HISTORY '
                         'WHERE SessionName = ? AND Idx = ?',
-                        (self._session_name, self._idx))
+                        (self._session_name, self._idx-1))
             conn.commit()
 
-            self._idx -= 1
-            self._size -= 1
-
+            conn.commit()
             conn.close()
+
+            self._idx = 0
+            self._size -= 1
+            self._unranked_list = self.get_list()
 
         return prev_item
 
-    def append(self, num: int):
+    def append(self, num: int, pivot: bool = False):
         conn = sqlite3.connect(DB_NAME)
         cur = conn.cursor()
 
-        cur.execute('INSERT INTO HISTORY (SessionName, Value, Idx)'
-                    'VALUES (?, ?, ?)',
-                    (self._session_name, num, self._idx))
+        cur.execute('INSERT INTO HISTORY (SessionName, Value, Idx, Type)'
+                    'VALUES (?, ?, ?, ?)',
+                    (self._session_name, num, self._idx, 'pivot' if pivot else 'comparison'))
         conn.commit()
 
         self._idx += 1
@@ -129,7 +152,17 @@ class SessionHistory:
         conn.close()
 
     def get_list(self):
-        return self._unranked_list
+        conn = sqlite3.connect(DB_NAME)
+        cur = conn.cursor()
+
+        cur.execute('SELECT S.List '
+                    'FROM SESSION AS S '
+                    'WHERE S.Name = ?', (self._session_name,))
+
+        row = cur.fetchone()
+        conn.commit()
+
+        return row[0].split('\n')
 
 
 def _setup_args():
@@ -140,27 +173,42 @@ def _setup_args():
     # TODO: If no list is given, let it pull a list from MAL
     parser = argparse.ArgumentParser(description='Tool to help you rank a list of items. Originally created to help '
                                                  'rank favorite anime, movies, and TV shows.')
-    parser.add_argument('--mal', action='store_true', help='If you are ranking anime, use this flag to pre-sort your '
-                                                           'list according to each titles\' score on MyAnimeList '
+    parser.add_argument('--mal', action='store_true', help='If you are ranking anime, use this flag to fetch your '
+                                                           'completed anime list and pre-sort it according to each '
+                                                           'titles\' score on MyAnimeList for quicker sorting.'
                                                            '(highest to lowest).')
     parser.add_argument('-l', '--list', action='store', type=str, nargs=1, default=None,
                         help='Specify the path to the text file containing the list you would like to rank.')
     return parser.parse_args()
 
 
-def ranked_lt(elem: str, piv: str):
+def is_int(num: str):
+    try:
+        int(num)
+    except ValueError:
+        return False
+
+    return True
+
+
+def get_user_input(elem: str, piv: str):
     print('[1] {} or [2] {}?'.format(elem, piv))
     choice = input('> ')
 
     while True:
-        if not (choice == '1' or choice == '2'):
+        if not (choice in ['1', '2', '<', 'q']):
             choice = input('> ')
         else:
             break
 
-    if int(choice) == 1:
-        return False
-    return True
+    if is_int(choice):
+        if int(choice) == 1:
+            return False
+        return True
+    elif choice == '<':
+        return Action.PREVIOUS
+    elif choice == 'q':
+        return Action.EXIT
 
 
 # TODO: Add ability for replay mode
@@ -170,7 +218,7 @@ def insertion_sort(arr: list, replay: bool):
         key = arr[i]
         j = i - 1
 
-        while j >= 0 and ranked_lt(key, arr[j]):
+        while j >= 0 and get_user_input(key, arr[j]):
             arr[j + 1] = arr[j]
             j = j - 1
 
@@ -187,7 +235,7 @@ def partition(arr: list, low: int, high: int, replay: bool, session: SessionHist
         piv_idx = session.next()
     else:
         piv_idx = random.randint(low, high)
-        session.append(piv_idx)
+        session.append(piv_idx, pivot=True)
 
     piv = arr[piv_idx]
     arr[piv_idx], arr[high] = arr[high], arr[piv_idx]
@@ -199,8 +247,11 @@ def partition(arr: list, low: int, high: int, replay: bool, session: SessionHist
         if replay:
             result = session.next()
         else:
-            result = ranked_lt(arr[j], piv)
-            session.append(int(result))
+            result = get_user_input(arr[j], piv)
+            if result in [Action.PREVIOUS, Action.EXIT]:
+                return result
+            else:
+                session.append(int(result))
 
         if result:
             i = i + 1
@@ -214,8 +265,16 @@ def quick_sort(arr: list, low: int, high: int, replay: bool, session: SessionHis
     if low < high:
         piv = partition(arr, low, high, replay, session)
 
-        quick_sort(arr, low, piv - 1, replay, session)
-        quick_sort(arr, piv + 1, high, replay, session)
+        if piv in [Action.PREVIOUS, Action.EXIT]:
+            return piv
+
+        qs_out = quick_sort(arr, low, piv - 1, replay, session)
+        if qs_out in [Action.PREVIOUS, Action.EXIT]:
+            return qs_out
+
+        qs_out = quick_sort(arr, piv + 1, high, replay, session)
+        if qs_out in [Action.PREVIOUS, Action.EXIT]:
+            return qs_out
 
 
 def main():
@@ -244,6 +303,7 @@ def main():
                     'SessionName    TEXT,'
                     'Value          INTEGER NOT NULL,'
                     'Idx            INTEGER NOT NULL,'
+                    'Type           TEXT NOT NULL,'
                     'FOREIGN KEY(SessionName) REFERENCES SESSION(Name))')
 
         conn.commit()
@@ -280,10 +340,9 @@ def main():
             while session_num == 0:
                 answer = input('Enter the number of the session you wish to load: ')
 
-                # TODO: Add specific exception
                 try:
                     answer = int(answer)
-                except Exception as e:
+                except ValueError:
                     print('Error: Invalid input. Please enter an integer.')
                     continue
 
@@ -333,16 +392,24 @@ def main():
 
         session = SessionHistory(str(answer.lower()), True, unranked_list)
 
-    quick_sort(unranked_list, 0, len(unranked_list) - 1, replay, session)
+    while True:
+        qs_out = quick_sort(unranked_list, 0, len(unranked_list) - 1, replay, session)
 
-    return
+        if qs_out == Action.EXIT:
+            return
+
+        if qs_out == Action.PREVIOUS:
+            session.previous()
+            unranked_list = session.get_list()
+            replay = True
+            continue
+
+        break
 
     # Write the results to a new file
     with open('output.txt', 'w+') as unranked_file:
         for item in unranked_list:
             unranked_file.write('{}\n'.format(item))
-
-    return
 
 
 if __name__ == '__main__':
