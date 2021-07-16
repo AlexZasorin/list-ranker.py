@@ -3,8 +3,13 @@ import argparse
 import os
 import random
 import sqlite3
+import sys
+import time
+
+import jikanpy
 
 from enum import Enum
+from jikanpy import Jikan
 
 DB_NAME = 'sessions.db'
 
@@ -14,11 +19,16 @@ class Action(Enum):
     EXIT = 1
 
 
+# TODO: Delete session from DB upon completion
+# TODO: Ability to delete sessions
+
+
 class SessionHistory:
-    def __init__(self, session_name: str, new: bool = True, list_: list = None):
+    def __init__(self, session_name: str, new: bool = True, list_: list = None, random_pivot: bool = True):
         self._session_name = session_name
         self._unranked_list = list_
         self._idx = 0
+        self.random_pivot = random_pivot
 
         conn = sqlite3.connect(DB_NAME)
         cur = conn.cursor()
@@ -31,12 +41,12 @@ class SessionHistory:
             # Create session in SQLite DB
             self._size = 0
 
-            cur.execute('INSERT INTO SESSION VALUES (?, ?, ?)',
-                        (session_name, 'Quick Sort', '\n'.join(self._unranked_list)))
+            cur.execute('INSERT INTO SESSION VALUES (?, ?, ?, ?)',
+                        (session_name, 'Quick Sort', '\n'.join(self._unranked_list), self.random_pivot))
             conn.commit()
         else:
             # Load session from SQLite DB
-            cur.execute('SELECT S.List '
+            cur.execute('SELECT S.List, S.RandomPivot '
                         'FROM SESSION AS S '
                         'WHERE S.Name = ?', (session_name,))
 
@@ -44,6 +54,7 @@ class SessionHistory:
             conn.commit()
 
             self._unranked_list = row[0].split('\n')
+            self.random_pivot = bool(row[1])
 
             cur.execute('SELECT H.Idx '
                         'FROM History AS H '
@@ -91,7 +102,7 @@ class SessionHistory:
             cur.execute('SELECT H.Value '
                         'FROM SESSION AS S, HISTORY AS H '
                         'WHERE S.Name = ? AND S.Name = H.SessionName AND H.Idx = ?',
-                        (self._session_name, self._idx-1))
+                        (self._session_name, self._idx - 1))
 
             row = cur.fetchone()
 
@@ -115,17 +126,17 @@ class SessionHistory:
                         'FROM SESSION AS S, HISTORY AS H '
                         'WHERE S.Name = ? AND S.Name = H.SessionName AND H.Idx IN (?,?)'
                         'ORDER BY H.Idx ',
-                        (self._session_name, self._idx-1, self._idx-2))
+                        (self._session_name, self._idx - 1, self._idx - 2))
 
             if cur.fetchone()[0] == 'comparison' and cur.fetchone()[0] == 'pivot':
                 cur.execute('DELETE FROM HISTORY '
                             'WHERE SessionName = ? AND Idx = ?',
-                            (self._session_name, self._idx-2))
+                            (self._session_name, self._idx - 2))
                 self._size -= 1
 
             cur.execute('DELETE FROM HISTORY '
                         'WHERE SessionName = ? AND Idx = ?',
-                        (self._session_name, self._idx-1))
+                        (self._session_name, self._idx - 1))
             conn.commit()
 
             conn.commit()
@@ -234,7 +245,12 @@ def partition(arr: list, low: int, high: int, replay: bool, session: SessionHist
     if replay:
         piv_idx = session.next()
     else:
-        piv_idx = random.randint(low, high)
+        if session.random_pivot:
+            piv_idx = random.randint(low, high)
+            print('Random pivot chosen')
+        else:
+            piv_idx = int(low + ((high - low) / 2))
+            print('Median pivot chosen')
         session.append(piv_idx, pivot=True)
 
     piv = arr[piv_idx]
@@ -296,7 +312,8 @@ def main():
         cur.execute('CREATE TABLE SESSION'
                     '(Name          TEXT PRIMARY KEY,'
                     'Algorithm      TEXT,'
-                    'List           TEXT)')
+                    'List           TEXT,'
+                    'RandomPivot    BOOLEAN)')
 
         cur.execute('CREATE TABLE HISTORY'
                     '(ID            INTEGER NOT NULL PRIMARY KEY,'
@@ -351,7 +368,7 @@ def main():
                 else:
                     print('Error: Invalid input. Please enter a number between 1 and ' + str(len(sessions)) + '.')
 
-        session_name = sessions[session_num-1]
+        session_name = sessions[session_num - 1]
         print('Loading session "' + session_name + '"')
 
         # Load session from SQLite DB
@@ -359,28 +376,7 @@ def main():
         unranked_list = session.get_list()
         replay = True
     else:
-        # Check if a directory was specified
-        if not dir_:
-            print('No list specified for ranking. Please specify a list using the -l or -list parameter.')
-
-        # Convert path to absolute path
-        if not os.path.isabs(dir_):
-            dir_ = os.path.abspath(dir_)
-
-        # Check if path leads to a file ending with .txt
-        if not str.endswith(dir_, '.txt'):
-            print('Error: You must specify a path to a .txt file.')
-            return
-
-        # Open list of items to be ranked and fetch the contents
-        unranked_file = open(dir_, 'r')
-        list_string = unranked_file.read()
-        unranked_file.close()
-
-        # Put the contents into a list
-        unranked_list = list_string.split('\n')
-
-        # Create session
+        # Get session name
         while True:
             answer = input('Please enter a name for this session: ')
 
@@ -390,7 +386,104 @@ def main():
 
             break
 
-        session = SessionHistory(str(answer.lower()), True, unranked_list)
+        if args.mal:
+            jikan = Jikan()
+            while True:
+                name = input('Please enter your MAL Username: ')
+
+                # cached = False
+                try:
+                    # cached = bool(jikan.user(username=name)['request_cached'])
+                    jikan.user(username=name)
+                except jikanpy.exceptions.APIException as e:
+                    time.sleep(4)
+                    if e.args[0] == 404:
+                        print('User not found, please try again.')
+                    else:
+                        print(str(e) + '\nAn error occurred trying to find user. Please try again.')
+                    continue
+                break
+
+            # if not cached:
+            #     print('Request not cached, sleeping...')
+            #     time.sleep(2)
+            time.sleep(4)
+
+            try:
+                anime_list = jikan.user(username=name, request='animelist', argument='completed')
+            except jikanpy.APIException as e:
+                print(str(e) + '\nAn error occurred trying to fetch your anime list.')
+                return
+
+            print('Fetching your completed anime from MAL, this may take a while...')
+
+            # if not bool(anime_list['request_cached']):
+            #     print('Request not cached, sleeping...')
+            #     time.sleep(2)
+            time.sleep(4)
+
+            counter = 0
+            anime_scores = dict()
+            for local_anime in anime_list['anime']:
+                while True:
+                    try:
+                        global_anime = jikan.anime(local_anime['mal_id'])
+                    except jikanpy.APIException as e:
+                        if e.args[0] == 403:
+                            print(str(e) + '\n403 error received, retrying in 5 seconds...')
+                        elif e.args[0] == 429:
+                            print('Rate limited, waiting 5 seconds...')
+                        else:
+                            print(str(e) + '\nRetrying in 5 seconds...')
+                        time.sleep(4)
+                        continue
+
+                    break
+
+                main_title = global_anime['title']
+                alt_title = global_anime['title_english']
+
+                if main_title != alt_title and alt_title is not None:
+                    anime_scores[main_title + ' (' + alt_title + ')'] = global_anime['score']
+                else:
+                    anime_scores[main_title] = global_anime['score']
+
+                counter += 1
+                sys.stdout.write('\r' + str(counter) + '/' + str(len(anime_list['anime'])) + ' retrieved!')
+
+                # if not bool(global_anime['request_cached']):
+                #     print('Request not cached, sleeping...')
+                #     time.sleep(2)
+                time.sleep(4)
+
+            unranked_list = [anime[0] for anime in sorted(anime_scores.items(), key=lambda x: x[1], reverse=True)]
+        else:
+            # Check if a directory was specified
+            if not dir_:
+                print('No list specified for ranking. Please specify a list using the -l or -list parameter.')
+                return
+
+            # Convert path to absolute path
+            if not os.path.isabs(dir_):
+                dir_ = os.path.abspath(dir_)
+
+            # Check if path leads to a file ending with .txt
+            if not str.endswith(dir_, '.txt'):
+                print('Error: You must specify a path to a .txt file.')
+                return
+
+            # Open list of items to be ranked and fetch the contents
+            unranked_file = open(dir_, 'r')
+            list_string = unranked_file.read()
+            unranked_file.close()
+
+            # Put the contents into a list
+            unranked_list = list_string.split('\n')
+
+        # Create session
+        session = SessionHistory(session_name=str(answer.lower()),
+                                 new=True, list_=unranked_list,
+                                 random_pivot=(not args.mal))
 
     while True:
         qs_out = quick_sort(unranked_list, 0, len(unranked_list) - 1, replay, session)
