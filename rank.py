@@ -21,6 +21,7 @@ class Action(Enum):
 
 # TODO: Delete session from DB upon completion
 # TODO: Ability to delete sessions
+# TODO: Cache MAL scores w/ expiration date
 
 
 class SessionHistory:
@@ -396,7 +397,7 @@ def main():
                     # cached = bool(jikan.user(username=name)['request_cached'])
                     jikan.user(username=name)
                 except jikanpy.exceptions.APIException as e:
-                    time.sleep(4)
+                    time.sleep(2)
                     if e.args[0] == 404:
                         print('User not found, please try again.')
                     else:
@@ -407,7 +408,7 @@ def main():
             # if not cached:
             #     print('Request not cached, sleeping...')
             #     time.sleep(2)
-            time.sleep(4)
+            time.sleep(2)
 
             try:
                 anime_list = jikan.user(username=name, request='animelist', argument='completed')
@@ -420,7 +421,7 @@ def main():
             # if not bool(anime_list['request_cached']):
             #     print('Request not cached, sleeping...')
             #     time.sleep(2)
-            time.sleep(4)
+            time.sleep(2)
 
             counter = 0
             anime_scores = dict()
@@ -435,7 +436,7 @@ def main():
                             print('Rate limited, waiting 5 seconds...')
                         else:
                             print(str(e) + '\nRetrying in 5 seconds...')
-                        time.sleep(4)
+                        time.sleep(5)
                         continue
 
                     break
@@ -454,7 +455,7 @@ def main():
                 # if not bool(global_anime['request_cached']):
                 #     print('Request not cached, sleeping...')
                 #     time.sleep(2)
-                time.sleep(4)
+                time.sleep(2)
 
             unranked_list = [anime[0] for anime in sorted(anime_scores.items(), key=lambda x: x[1], reverse=True)]
         else:
