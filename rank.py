@@ -19,6 +19,7 @@ class Action(Enum):
     EXIT = 1
 
 
+# TODO: Add session type
 # TODO: Delete session from DB upon completion
 # TODO: Ability to delete sessions
 # TODO: Cache MAL scores w/ expiration date
@@ -65,7 +66,7 @@ class SessionHistory:
             row = cur.fetchone()
             conn.commit()
 
-            self._size = row[0]
+            self._size = 0 if row is None else row[0]
 
         conn.close()
 
@@ -129,18 +130,21 @@ class SessionHistory:
                         'ORDER BY H.Idx ',
                         (self._session_name, self._idx - 1, self._idx - 2))
 
-            if cur.fetchone()[0] == 'comparison' and cur.fetchone()[0] == 'pivot':
-                cur.execute('DELETE FROM HISTORY '
-                            'WHERE SessionName = ? AND Idx = ?',
-                            (self._session_name, self._idx - 2))
-                self._size -= 1
+            r_one = cur.fetchone()
+            r_two = cur.fetchone()
+
+            if r_one is not None and r_two is not None:
+                if r_one[0] == 'comparison' and r_two[0] == 'pivot':
+                    cur.execute('DELETE FROM HISTORY '
+                                'WHERE SessionName = ? AND Idx = ?',
+                                (self._session_name, self._idx - 2))
+                    self._size -= 1
 
             cur.execute('DELETE FROM HISTORY '
                         'WHERE SessionName = ? AND Idx = ?',
                         (self._session_name, self._idx - 1))
             conn.commit()
 
-            conn.commit()
             conn.close()
 
             self._idx = 0
@@ -223,16 +227,38 @@ def get_user_input(elem: str, piv: str):
         return Action.EXIT
 
 
-# TODO: Add ability for replay mode
-# TODO: Use when array size is <= 5
-def insertion_sort(arr: list, replay: bool):
+def insertion_sort(arr: list, replay: bool, session: SessionHistory):
     for i in range(1, len(arr)):
         key = arr[i]
         j = i - 1
 
-        while j >= 0 and get_user_input(key, arr[j]):
+        if replay and session.peek_next() is None:
+            replay = False
+
+        if replay:
+            result = session.next()
+        else:
+            result = get_user_input(arr[j], key)
+            if result in [Action.PREVIOUS, Action.EXIT]:
+                return result
+            else:
+                session.append(int(result))
+
+        while j >= 0 and result:
             arr[j + 1] = arr[j]
             j = j - 1
+
+            if replay and session.peek_next() is None:
+                replay = False
+
+            if replay:
+                result = session.next()
+            else:
+                result = get_user_input(arr[j], key)
+                if result in [Action.PREVIOUS, Action.EXIT]:
+                    return result
+                else:
+                    session.append(int(result))
 
         arr[j + 1] = key
 
@@ -264,7 +290,7 @@ def partition(arr: list, low: int, high: int, replay: bool, session: SessionHist
         if replay:
             result = session.next()
         else:
-            result = get_user_input(arr[j], piv)
+            result = get_user_input(piv, arr[j])
             if result in [Action.PREVIOUS, Action.EXIT]:
                 return result
             else:
@@ -456,6 +482,8 @@ def main():
                 #     print('Request not cached, sleeping...')
                 #     time.sleep(2)
                 time.sleep(2)
+
+            print()
 
             unranked_list = [anime[0] for anime in sorted(anime_scores.items(), key=lambda x: x[1], reverse=True)]
         else:
